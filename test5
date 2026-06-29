@@ -1,4 +1,4 @@
-export {};
+export {123};
 
 const mockRequestInterceptorUse = jest.fn();
 const mockResponseInterceptorUse = jest.fn();
