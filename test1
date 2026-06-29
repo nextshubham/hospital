@@ -1,4 +1,4 @@
-//httpRetry.ts
+//httpClient.ts
 import axios, {
   AxiosError,
   AxiosResponse,
