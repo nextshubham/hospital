@@ -1,97 +1,242 @@
-import https from 'https';123
-import axios, {
-  AxiosResponse,
-  InternalAxiosRequestConfig,
-} from 'axios';
-import config from '../config/env';
-import logger from '../utils/logger';
-import {
-  HTTP_RETRY_COUNT,
-  delay,
-  getRetryDelay,
-  isRetryableHttpError,
-} from '../utils/httpRetry';
-import { getAprimoAccessToken } from './aprimoTokenService';
+export {};
 
-type RetriableRequestConfig = InternalAxiosRequestConfig & {
-  retryAttempt?: number;
+const mockRequestInterceptorUse = jest.fn();
+const mockResponseInterceptorUse = jest.fn();
+
+const mockAxiosInstance = {
+  interceptors: {
+    request: {
+      use: mockRequestInterceptorUse,
+    },
+    response: {
+      use: mockResponseInterceptorUse,
+    },
+  },
+  request: jest.fn(),
 };
 
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: false,
-});
+const mockAxiosCreate = jest.fn(() => mockAxiosInstance);
+const mockAxiosIsAxiosError = jest.fn();
+const mockGetAprimoAccessToken = jest.fn();
+const mockLoggerWarn = jest.fn();
 
-const httpClient = axios.create({
-  baseURL: config.APRIMO_BASE_URL,
-  timeout: 30000,
-  httpsAgent,
-});
+const mockDelay = jest.fn().mockResolvedValue(undefined);
+const mockGetRetryDelay = jest.fn((retryAttempt: number) => retryAttempt * 500);
+const mockIsRetryableHttpError = jest.fn();
 
-httpClient.interceptors.request.use(
-  async (
-    requestConfig: InternalAxiosRequestConfig
-  ): Promise<InternalAxiosRequestConfig> => {
-    const token = await getAprimoAccessToken();
-
-    return {
-      ...requestConfig,
-      headers: {
-        ...requestConfig.headers,
-        Accept: 'application/json',
-        Authorization: `Bearer ${token}`,
-      } as InternalAxiosRequestConfig['headers'],
-    };
+jest.mock('axios', () => ({
+  __esModule: true,
+  default: {
+    create: mockAxiosCreate,
+    isAxiosError: mockAxiosIsAxiosError,
   },
-  (error: unknown): Promise<never> => {
-    if (error instanceof Error) {
-      return Promise.reject(error);
-    }
+  create: mockAxiosCreate,
+  isAxiosError: mockAxiosIsAxiosError,
+}));
 
-    return Promise.reject(new Error(String(error)));
-  }
-);
+jest.mock('../../config/env', () => ({
+  __esModule: true,
+  default: {
+    APRIMO_BASE_URL: 'https://training3.dam.aprimo.com',
+  },
+}));
 
-httpClient.interceptors.response.use(
-  (response: AxiosResponse): AxiosResponse => response,
-  async (error: unknown): Promise<AxiosResponse> => {
-    if (!axios.isAxiosError(error) || error.config === undefined) {
-      if (error instanceof Error) {
-        return Promise.reject(error);
-      }
+jest.mock('../../utils/logger', () => ({
+  __esModule: true,
+  default: {
+    warn: mockLoggerWarn,
+    error: jest.fn(),
+    info: jest.fn(),
+    debug: jest.fn(),
+    trace: jest.fn(),
+  },
+}));
 
-      return Promise.reject(new Error(String(error)));
-    }
+jest.mock('../../utils/httpRetry', () => ({
+  HTTP_RETRY_COUNT: 3,
+  delay: mockDelay,
+  getRetryDelay: mockGetRetryDelay,
+  isRetryableHttpError: mockIsRetryableHttpError,
+}));
 
-    const requestConfig = error.config as RetriableRequestConfig;
+jest.mock('../../services/aprimoTokenService', () => ({
+  getAprimoAccessToken: mockGetAprimoAccessToken,
+}));
 
-    requestConfig.retryAttempt = requestConfig.retryAttempt ?? 0;
+describe('httpClient', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    jest.clearAllMocks();
 
-    if (
-      requestConfig.retryAttempt >= HTTP_RETRY_COUNT ||
-      !isRetryableHttpError(error)
-    ) {
-      return Promise.reject(error);
-    }
+    mockAxiosCreate.mockReturnValue(mockAxiosInstance);
+    mockDelay.mockResolvedValue(undefined);
+    mockGetRetryDelay.mockImplementation(
+      (retryAttempt: number) => retryAttempt * 500
+    );
+  });
 
-    requestConfig.retryAttempt += 1;
+  it('should create axios instance with Aprimo base URL', async () => {
+    const httpClient = await import('../../services/httpClient');
 
-    const delayMs = getRetryDelay(requestConfig.retryAttempt);
+    expect(mockAxiosCreate).toHaveBeenCalledTimes(1);
+    expect(mockAxiosCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseURL: 'https://training3.dam.aprimo.com',
+        timeout: 30000,
+        httpsAgent: expect.any(Object),
+      })
+    );
 
-    logger.warn({
-      msg: 'Retrying Aprimo HTTP request',
-      options: {
-        retryAttempt: requestConfig.retryAttempt,
-        delayMs,
-        status: error.response?.status,
-        url: requestConfig.url,
-        method: requestConfig.method,
+    expect(httpClient.default).toBe(mockAxiosInstance);
+  });
+
+  it('should register request and response interceptors', async () => {
+    await import('../../services/httpClient');
+
+    expect(mockRequestInterceptorUse).toHaveBeenCalledTimes(1);
+    expect(mockResponseInterceptorUse).toHaveBeenCalledTimes(1);
+  });
+
+  it('should add Authorization and Accept headers in request interceptor', async () => {
+    await import('../../services/httpClient');
+
+    mockGetAprimoAccessToken.mockResolvedValue('test-access-token');
+
+    const requestSuccessHandler = mockRequestInterceptorUse.mock.calls[0][0];
+
+    const result = await requestSuccessHandler({
+      headers: {
+        ExistingHeader: 'existing-value',
       },
     });
 
-    await delay(delayMs);
+    expect(result.headers).toEqual(
+      expect.objectContaining({
+        ExistingHeader: 'existing-value',
+        Accept: 'application/json',
+        Authorization: 'Bearer test-access-token',
+      })
+    );
+  });
 
-    return httpClient.request(requestConfig);
-  }
-);
+  it('should reject request interceptor error', async () => {
+    await import('../../services/httpClient');
 
-export default httpClient;
+    const requestErrorHandler = mockRequestInterceptorUse.mock.calls[0][1];
+
+    await expect(
+      requestErrorHandler(new Error('Request failed'))
+    ).rejects.toThrow('Request failed');
+  });
+
+  it('should return response from response success interceptor', async () => {
+    await import('../../services/httpClient');
+
+    const responseSuccessHandler = mockResponseInterceptorUse.mock.calls[0][0];
+
+    const response = {
+      data: {
+        id: 'test-id',
+      },
+    };
+
+    expect(responseSuccessHandler(response)).toBe(response);
+  });
+
+  it('should retry retryable Aprimo HTTP request', async () => {
+    await import('../../services/httpClient');
+
+    const responseErrorHandler = mockResponseInterceptorUse.mock.calls[0][1];
+
+    const requestConfig = {
+      url: '/api/core/record/test-id',
+      method: 'get',
+      headers: {},
+    };
+
+    const error = {
+      response: {
+        status: 500,
+      },
+      config: requestConfig,
+    };
+
+    const retryResponse = {
+      data: {
+        id: 'test-id',
+      },
+    };
+
+    mockAxiosIsAxiosError.mockReturnValue(true);
+    mockIsRetryableHttpError.mockReturnValue(true);
+    mockAxiosInstance.request.mockResolvedValue(retryResponse);
+
+    const result = await responseErrorHandler(error);
+
+    expect(result).toBe(retryResponse);
+    expect(requestConfig).toEqual(
+      expect.objectContaining({
+        retryAttempt: 1,
+      })
+    );
+
+    expect(mockGetRetryDelay).toHaveBeenCalledWith(1);
+    expect(mockDelay).toHaveBeenCalledWith(500);
+    expect(mockAxiosInstance.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: '/api/core/record/test-id',
+        method: 'get',
+        retryAttempt: 1,
+      })
+    );
+  });
+
+  it('should not retry non-retryable Aprimo HTTP request', async () => {
+    await import('../../services/httpClient');
+
+    const responseErrorHandler = mockResponseInterceptorUse.mock.calls[0][1];
+
+    const error = {
+      response: {
+        status: 400,
+      },
+      config: {
+        url: '/api/core/record/test-id',
+        method: 'get',
+      },
+    };
+
+    mockAxiosIsAxiosError.mockReturnValue(true);
+    mockIsRetryableHttpError.mockReturnValue(false);
+
+    await expect(responseErrorHandler(error)).rejects.toBe(error);
+
+    expect(mockDelay).not.toHaveBeenCalled();
+    expect(mockAxiosInstance.request).not.toHaveBeenCalled();
+  });
+
+  it('should not retry when retry count is exhausted', async () => {
+    await import('../../services/httpClient');
+
+    const responseErrorHandler = mockResponseInterceptorUse.mock.calls[0][1];
+
+    const error = {
+      response: {
+        status: 500,
+      },
+      config: {
+        url: '/api/core/record/test-id',
+        method: 'get',
+        retryAttempt: 3,
+      },
+    };
+
+    mockAxiosIsAxiosError.mockReturnValue(true);
+    mockIsRetryableHttpError.mockReturnValue(true);
+
+    await expect(responseErrorHandler(error)).rejects.toBe(error);
+
+    expect(mockDelay).not.toHaveBeenCalled(); 8898
+    expect(mockAxiosInstance.request).not.toHaveBeenCalled();
+  });
+});
