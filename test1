@@ -1,23 +1,30 @@
 //httpRetry.ts
+import axios, {
+  AxiosError,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from 'axios';
+import config from '../config/env';
+import httpsAgent from '../constants/httpAgent';
+import logger from '../utils/logger';
+import { getAprimoAccessToken } from './aprimoTokenService';
 
-import axios from 'axios';
+const HTTP_RETRY_COUNT = 3;
+const HTTP_RETRY_DELAY_INCREMENT_MS = 500;
 
-export const HTTP_RETRY_COUNT = 3;
-export const HTTP_RETRY_DELAY_INCREMENT_MS = 500;
+type RetriableRequestConfig = InternalAxiosRequestConfig & {
+  retryAttempt?: number;
+};
 
-export const delay = (delayMs: number): Promise<void> =>
+const delay = (delayMs: number): Promise<void> =>
   new Promise(resolve => {
     setTimeout(resolve, delayMs);
   });
 
-export const getRetryDelay = (retryAttempt: number): number =>
+const getRetryDelay = (retryAttempt: number): number =>
   retryAttempt * HTTP_RETRY_DELAY_INCREMENT_MS;
 
-export const isRetryableHttpError = (error: unknown): boolean => {
-  if (!axios.isAxiosError(error)) {
-    return false;
-  }
-
+const isRetryableHttpError = (error: AxiosError): boolean => {
   const status = error.response?.status;
 
   if (status === undefined) {
@@ -27,36 +34,77 @@ export const isRetryableHttpError = (error: unknown): boolean => {
   return status === 408 || status === 429 || status >= 500;
 };
 
-type RetryOptions = {
-  retries?: number;
-  shouldRetry?: (error: unknown) => boolean;
-  onRetry?: (error: unknown, retryAttempt: number, delayMs: number) => void;
-};
+const httpClient = axios.create({
+  baseURL: config.APRIMO_BASE_URL,
+  timeout: 30000,
+  httpsAgent,
+});
 
-export const executeWithRetry = async <T>(
-  operation: () => Promise<T>,
-  options: RetryOptions = {}
-): Promise<T> => {
-  const retries = options.retries ?? HTTP_RETRY_COUNT;
-  const shouldRetry = options.shouldRetry ?? isRetryableHttpError;
+httpClient.interceptors.request.use(
+  async (
+    requestConfig: InternalAxiosRequestConfig
+  ): Promise<InternalAxiosRequestConfig> => {
+    const token = await getAprimoAccessToken();
 
-  let retryAttempt = 0;
+    return {
+      ...requestConfig,
+      headers: {
+        ...requestConfig.headers,
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+      } as InternalAxiosRequestConfig['headers'],
+    };
+  },
+  (error: unknown): Promise<never> => {
+    if (error instanceof Error) {
+      return Promise.reject(error);
+    }
 
-  while (true) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (retryAttempt >= retries || !shouldRetry(error)) {
-        throw error;
+    return Promise.reject(new Error(String(error)));
+  }
+);
+
+httpClient.interceptors.response.use(
+  (response: AxiosResponse): AxiosResponse => response,
+  async (error: unknown): Promise<AxiosResponse> => {
+    if (!axios.isAxiosError(error) || error.config === undefined) {
+      if (error instanceof Error) {
+        return Promise.reject(error);
       }
 
-      retryAttempt += 1;
-
-      const delayMs = getRetryDelay(retryAttempt);
-
-      options.onRetry?.(error, retryAttempt, delayMs);
-
-      await delay(delayMs);
+      return Promise.reject(new Error(String(error)));
     }
+
+    const requestConfig = error.config as RetriableRequestConfig;
+
+    requestConfig.retryAttempt = requestConfig.retryAttempt ?? 0;
+
+    if (
+      requestConfig.retryAttempt >= HTTP_RETRY_COUNT ||
+      !isRetryableHttpError(error)
+    ) {
+      return Promise.reject(error);
+    }
+
+    requestConfig.retryAttempt += 1;
+
+    const delayMs = getRetryDelay(requestConfig.retryAttempt);
+
+    logger.warn({
+      msg: 'Retrying Aprimo HTTP request',
+      options: {
+        retryAttempt: requestConfig.retryAttempt,
+        delayMs,
+        status: error.response?.status,
+        url: requestConfig.url,
+        method: requestConfig.method,
+      },
+    });
+
+    await delay(delayMs);
+
+    return httpClient.request(requestConfig);
   }
-};
+);
+
+export default httpClient;
