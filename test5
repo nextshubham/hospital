@@ -1,0 +1,371 @@
+export {};
+
+const mockIsAxiosError = jest.fn();
+
+jest.mock('axios', () => ({
+  __esModule: true,
+  default: {
+    isAxiosError: mockIsAxiosError,
+  },
+  isAxiosError: mockIsAxiosError,
+}));
+
+import {
+  HTTP_RETRY_COUNT,
+  HTTP_RETRY_DELAY_INCREMENT_MS,
+  delay,
+  executeWithRetry,
+  getRetryDelay,
+  isRetryableHttpError,
+} from '../../utils/httpRetry';
+
+const flushPromises = async (): Promise<void> => {
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
+const advanceRetryTimer = async (delayMs: number): Promise<void> => {
+  await flushPromises();
+  jest.advanceTimersByTime(delayMs);
+  await flushPromises();
+};
+
+describe('httpRetry', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useRealTimers();
+  });
+
+  describe('retry constants', () => {
+    it('should have retry count as 3', () => {
+      expect(HTTP_RETRY_COUNT).toBe(3);
+    });
+
+    it('should have retry delay increment as 500 ms', () => {
+      expect(HTTP_RETRY_DELAY_INCREMENT_MS).toBe(500);
+    });
+  });
+
+  describe('getRetryDelay', () => {
+    it('should return 500 ms for first retry attempt', () => {
+      expect(getRetryDelay(1)).toBe(500);
+    });
+
+    it('should return 1000 ms for second retry attempt', () => {
+      expect(getRetryDelay(2)).toBe(1000);
+    });
+
+    it('should return 1500 ms for third retry attempt', () => {
+      expect(getRetryDelay(3)).toBe(1500);
+    });
+  });
+
+  describe('delay', () => {
+    it('should resolve after given delay', async () => {
+      jest.useFakeTimers();
+
+      let isResolved = false;
+
+      const delayPromise = delay(500).then(() => {
+        isResolved = true;
+      });
+
+      await flushPromises();
+
+      expect(isResolved).toBe(false);
+
+      jest.advanceTimersByTime(500);
+
+      await delayPromise;
+
+      expect(isResolved).toBe(true);
+    });
+  });
+
+  describe('isRetryableHttpError', () => {
+    it('should return false when error is not Axios error', () => {
+      mockIsAxiosError.mockReturnValue(false);
+
+      const result = isRetryableHttpError(new Error('Normal error'));
+
+      expect(result).toBe(false);
+    });
+
+    it('should return true for Axios error without response status', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({});
+
+      expect(result).toBe(true);
+    });
+
+    it('should return true for 408 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 408,
+        },
+      });
+
+      expect(result).toBe(true);
+    });
+
+    it('should return true for 429 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 429,
+        },
+      });
+
+      expect(result).toBe(true);
+    });
+
+    it('should return true for 500 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 500,
+        },
+      });
+
+      expect(result).toBe(true);
+    });
+
+    it('should return true for 503 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 503,
+        },
+      });
+
+      expect(result).toBe(true);
+    });
+
+    it('should return false for 400 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 400,
+        },
+      });
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for 401 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 401,
+        },
+      });
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for 403 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 403,
+        },
+      });
+
+      expect(result).toBe(false);
+    });
+
+    it('should return false for 404 status code', () => {
+      mockIsAxiosError.mockReturnValue(true);
+
+      const result = isRetryableHttpError({
+        response: {
+          status: 404,
+        },
+      });
+
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('executeWithRetry', () => {
+    it('should return operation result when operation succeeds on first attempt', async () => {
+      const operation = jest.fn().mockResolvedValue('success');
+
+      const result = await executeWithRetry(operation);
+
+      expect(result).toBe('success');
+      expect(operation).toHaveBeenCalledTimes(1);
+    });
+
+    it('should retry once and return result when operation succeeds on second attempt', async () => {
+      jest.useFakeTimers();
+
+      const retryableError = {
+        response: {
+          status: 500,
+        },
+      };
+
+      const operation = jest
+        .fn()
+        .mockRejectedValueOnce(retryableError)
+        .mockResolvedValue('success');
+
+      const onRetry = jest.fn();
+
+      mockIsAxiosError.mockReturnValue(true);
+
+      const resultPromise = executeWithRetry(operation, {
+        onRetry,
+      });
+
+      await advanceRetryTimer(500);
+
+      await expect(resultPromise).resolves.toBe('success');
+
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(onRetry).toHaveBeenCalledWith(retryableError, 1, 500);
+    });
+
+    it('should retry three times and return result when operation succeeds on fourth attempt', async () => {
+      jest.useFakeTimers();
+
+      const retryableError = {
+        response: {
+          status: 503,
+        },
+      };
+
+      const operation = jest
+        .fn()
+        .mockRejectedValueOnce(retryableError)
+        .mockRejectedValueOnce(retryableError)
+        .mockRejectedValueOnce(retryableError)
+        .mockResolvedValue('success');
+
+      const onRetry = jest.fn();
+
+      mockIsAxiosError.mockReturnValue(true);
+
+      const resultPromise = executeWithRetry(operation, {
+        onRetry,
+      });
+
+      await advanceRetryTimer(500);
+      await advanceRetryTimer(1000);
+      await advanceRetryTimer(1500);
+
+      await expect(resultPromise).resolves.toBe('success');
+
+      expect(operation).toHaveBeenCalledTimes(4);
+
+      expect(onRetry).toHaveBeenNthCalledWith(1, retryableError, 1, 500);
+      expect(onRetry).toHaveBeenNthCalledWith(2, retryableError, 2, 1000);
+      expect(onRetry).toHaveBeenNthCalledWith(3, retryableError, 3, 1500);
+    });
+
+    it('should throw error after all retries are exhausted', async () => {
+      jest.useFakeTimers();
+
+      const retryableError = {
+        response: {
+          status: 500,
+        },
+      };
+
+      const operation = jest.fn().mockRejectedValue(retryableError);
+
+      mockIsAxiosError.mockReturnValue(true);
+
+      const resultPromise = executeWithRetry(operation);
+
+      await advanceRetryTimer(500);
+      await advanceRetryTimer(1000);
+      await advanceRetryTimer(1500);
+
+      await expect(resultPromise).rejects.toBe(retryableError);
+
+      expect(operation).toHaveBeenCalledTimes(4);
+    });
+
+    it('should not retry when error is not retryable', async () => {
+      const nonRetryableError = {
+        response: {
+          status: 400,
+        },
+      };
+
+      const operation = jest.fn().mockRejectedValue(nonRetryableError);
+
+      const onRetry = jest.fn();
+
+      mockIsAxiosError.mockReturnValue(true);
+
+      await expect(
+        executeWithRetry(operation, {
+          onRetry,
+        })
+      ).rejects.toBe(nonRetryableError);
+
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(onRetry).not.toHaveBeenCalled();
+    });
+
+    it('should use custom retry count when provided', async () => {
+      jest.useFakeTimers();
+
+      const retryableError = {
+        response: {
+          status: 500,
+        },
+      };
+
+      const operation = jest.fn().mockRejectedValue(retryableError);
+
+      mockIsAxiosError.mockReturnValue(true);
+
+      const resultPromise = executeWithRetry(operation, {
+        retries: 1,
+      });
+
+      await advanceRetryTimer(500);
+
+      await expect(resultPromise).rejects.toBe(retryableError);
+
+      expect(operation).toHaveBeenCalledTimes(2);
+    });
+
+    it('should use custom shouldRetry function when provided', async () => {
+      jest.useFakeTimers();
+
+      const retryableError = new Error('Custom retry error');
+
+      const operation = jest
+        .fn()
+        .mockRejectedValueOnce(retryableError)
+        .mockResolvedValue('success');
+
+      const shouldRetry = jest.fn().mockReturnValue(true);
+
+      const resultPromise = executeWithRetry(operation, {
+        shouldRetry,
+      });
+
+      await advanceRetryTimer(500);
+
+      await expect(resultPromise).resolves.toBe('success');
+
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(shouldRetry).toHaveBeenCalledWith(retryableError);
+    });
+  });
+});
