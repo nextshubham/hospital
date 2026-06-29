@@ -1,0 +1,61 @@
+//httpRetry.ts
+import axios from 'axios';
+
+export const HTTP_RETRY_COUNT = 3;
+export const HTTP_RETRY_DELAY_INCREMENT_MS = 500;
+
+export const delay = (delayMs: number): Promise<void> =>
+  new Promise(resolve => {
+    setTimeout(resolve, delayMs);
+  });
+
+export const getRetryDelay = (retryAttempt: number): number =>
+  retryAttempt * HTTP_RETRY_DELAY_INCREMENT_MS;
+
+export const isRetryableHttpError = (error: unknown): boolean => {
+  if (!axios.isAxiosError(error)) {
+    return false;
+  }
+
+  const status = error.response?.status;
+
+  if (status === undefined) {
+    return true;
+  }
+
+  return status === 408 || status === 429 || status >= 500;
+};
+
+type RetryOptions = {
+  retries?: number;
+  shouldRetry?: (error: unknown) => boolean;
+  onRetry?: (error: unknown, retryAttempt: number, delayMs: number) => void;
+};
+
+export const executeWithRetry = async <T>(
+  operation: () => Promise<T>,
+  options: RetryOptions = {}
+): Promise<T> => {
+  const retries = options.retries ?? HTTP_RETRY_COUNT;
+  const shouldRetry = options.shouldRetry ?? isRetryableHttpError;
+
+  let retryAttempt = 0;
+
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (retryAttempt >= retries || !shouldRetry(error)) {
+        throw error;
+      }
+
+      retryAttempt += 1;
+
+      const delayMs = getRetryDelay(retryAttempt);
+
+      options.onRetry?.(error, retryAttempt, delayMs);
+
+      await delay(delayMs);
+    }
+  }
+};
