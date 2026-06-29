@@ -1,0 +1,100 @@
+//aprimoTokenService.ts
+import https from 'https';
+import axios, { AxiosResponse } from 'axios';
+import config from '../config/env';
+import logger from '../utils/logger';
+import { executeWithRetry } from '../utils/httpRetry';
+
+type AprimoTokenResponse = {
+  access_token: string;
+  expires_in: number;
+  token_type?: string;
+};
+
+let cachedAccessToken: string | null = null;
+let tokenExpiresAt = 0;
+
+const TOKEN_EXPIRY_BUFFER_MS = 60 * 1000;
+
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+});
+
+const isCachedTokenValid = (): boolean =>
+  cachedAccessToken !== null &&
+  Date.now() < tokenExpiresAt - TOKEN_EXPIRY_BUFFER_MS;
+
+export const getAprimoAccessToken = async (): Promise<string> => {
+  if (isCachedTokenValid() && cachedAccessToken) {
+    return cachedAccessToken;
+  }
+
+  const body = new URLSearchParams();
+
+  body.append('grant_type', 'client_credentials');
+  body.append('scope', config.APRIMO_SCOPE);
+  body.append('client_id', config.APRIMO_CLIENT_ID);
+  body.append('client_secret', config.APRIMO_CLIENT_SECRET);
+
+  try {
+    const response: AxiosResponse<AprimoTokenResponse> = await executeWithRetry<
+      AxiosResponse<AprimoTokenResponse>
+    >(
+      () =>
+        axios.post<AprimoTokenResponse>(
+          config.APRIMO_TOKEN_URL,
+          body.toString(),
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            timeout: 3000,
+            httpsAgent,
+          }
+        ),
+      {
+        onRetry: (error, retryAttempt, delayMs) => {
+          if (axios.isAxiosError(error)) {
+            logger.warn({
+              msg: 'Retrying Aprimo token request',
+              options: {
+                retryAttempt,
+                delayMs,
+                status: error.response?.status,
+                url: error.config?.url,
+              },
+            });
+
+            return;
+          }
+
+          logger.warn({
+            msg: 'Retrying Aprimo token request',
+            options: {
+              retryAttempt,
+              delayMs,
+            },
+          });
+        },
+      }
+    );
+
+    cachedAccessToken = response.data.access_token;
+    tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
+
+    return cachedAccessToken;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      logger.error({
+        msg: 'Failed to retrieve aprimo access token',
+        options: {
+          status: error.response?.status,
+          response: error.response?.data,
+          url: error.config?.url,
+        },
+      });
+    }
+
+    throw error;
+  }
+};
