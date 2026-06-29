@@ -1,38 +1,26 @@
 //httpClient.ts
+import https from 'https';
 import axios, {
-  AxiosError,
   AxiosResponse,
   InternalAxiosRequestConfig,
 } from 'axios';
 import config from '../config/env';
-import httpsAgent from '../constants/httpAgent';
 import logger from '../utils/logger';
+import {
+  HTTP_RETRY_COUNT,
+  delay,
+  getRetryDelay,
+  isRetryableHttpError,
+} from '../utils/httpRetry';
 import { getAprimoAccessToken } from './aprimoTokenService';
-
-const HTTP_RETRY_COUNT = 3;
-const HTTP_RETRY_DELAY_INCREMENT_MS = 500;
 
 type RetriableRequestConfig = InternalAxiosRequestConfig & {
   retryAttempt?: number;
 };
 
-const delay = (delayMs: number): Promise<void> =>
-  new Promise(resolve => {
-    setTimeout(resolve, delayMs);
-  });
-
-const getRetryDelay = (retryAttempt: number): number =>
-  retryAttempt * HTTP_RETRY_DELAY_INCREMENT_MS;
-
-const isRetryableHttpError = (error: AxiosError): boolean => {
-  const status = error.response?.status;
-
-  if (status === undefined) {
-    return true;
-  }
-
-  return status === 408 || status === 429 || status >= 500;
-};
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false,
+});
 
 const httpClient = axios.create({
   baseURL: config.APRIMO_BASE_URL,
