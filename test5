@@ -91,4 +91,5 @@ const runRetryApiTest = async (): Promise<void> => {
   });
 };
 
-runRetryApiTest();99
+runRetryApiTest();
+npx ts-node src/test-retry-api.ts
