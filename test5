@@ -1,95 +1,88 @@
-import * as http from 'http';
+7import express, { ErrorRequestHandler } from 'express';
+import request from 'supertest';
+import WebhookController from '../../controllers/WebhookController';
+import { processAssetExpiryWebhook } from '../../services/webhookService';
 
-const PORT = 4010;
+jest.mock('../../services/webhookService');
 
-let aprimoApiAttemptCount = 0;
+const mockedProcessAssetExpiryWebhook =
+  processAssetExpiryWebhook as jest.MockedFunction<
+    typeof processAssetExpiryWebhook
+  >;
 
-process.env.APRIMO_BASE_URL = `http://localhost:${PORT}`;
-process.env.APRIMO_TOKEN_URL = `http://localhost:${PORT}/oauth/token`;
-process.env.APRIMO_CLIENT_ID = 'local-test-client-id';
-process.env.APRIMO_CLIENT_SECRET = 'local-test-client-secret';
-process.env.APRIMO_SCOPE = 'local-test-scope';
+describe('WebhookController', () => {
+  const createApp = () => {
+    const app = express();
 
-const sendJsonResponse = (
-  response: http.ServerResponse,
-  statusCode: number,
-  data: unknown
-): void => {
-  response.writeHead(statusCode, {
-    'Content-Type': 'application/json',
+    app.use(express.json());
+
+    app.post(
+      '/api/v1/webhook/asset-expiry',
+      WebhookController.assetExpiry
+    );
+
+    const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+      res.status(500).json({
+        message: error.message,
+      });
+    };
+
+    app.use(errorHandler);
+
+    return app;
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
   });
 
-  response.end(JSON.stringify(data));
-};
+  it('should process asset expiry webhook successfully', async () => {
+    const app = createApp();
 
-const server = http.createServer(
-  (request: http.IncomingMessage, response: http.ServerResponse): void => {
-    if (request.method === 'POST' && request.url === '/oauth/token') {
-      console.log('Token API called');
+    const payload = {
+      environment: 'dev',
+      recordId: 'test-record-id',
+      contentType: 'Asset',
+      triggerType: 'update',
+      calculatedExpirationDate: '2026-12-31',
+    };
 
-      sendJsonResponse(response, 200, {
-        access_token: 'local-test-access-token',
-        expires_in: 3600,
-        token_type: 'Bearer',
-      });
-
-      return;
-    }
-
-    if (
-      request.method === 'GET' &&
-      request.url === '/api/core/record/retry-test'
-    ) {
-      aprimoApiAttemptCount += 1;
-
-      console.log(`Aprimo API attempt number: ${aprimoApiAttemptCount}`);
-
-      if (aprimoApiAttemptCount < 3) {
-        sendJsonResponse(response, 500, {
-          message: 'Temporary server error from local test API',
-        });
-
-        return;
-      }
-
-      sendJsonResponse(response, 200, {
-        id: 'retry-test',
-        message: 'API call successful after retry',
-        totalAttempts: aprimoApiAttemptCount,
-      });
-
-      return;
-    }
-
-    sendJsonResponse(response, 404, {
-      message: 'Route not found in local test API',
-      method: request.method,
-      url: request.url,
+    mockedProcessAssetExpiryWebhook.mockResolvedValue({
+      message: 'processed',
     });
-  }
-);
 
-const runRetryApiTest = async (): Promise<void> => {
-  server.listen(PORT, async () => {
-    console.log(`Local test API started on http://localhost:${PORT}`);
-    console.log('Importing httpClient after setting local test config');
+    const response = await request(app)
+      .post('/api/v1/webhook/asset-expiry')
+      .send(payload);
 
-    try {
-      const { default: httpClient } = await import('./services/httpClient');
-
-      const response = await httpClient.get('/api/core/record/retry-test');
-
-      console.log('Final response:', response.data);
-      console.log('Retry API test completed successfully');
-    } catch (error) {
-      console.error('Retry API test failed:', error);
-    } finally {
-      server.close(() => {
-        console.log('Local test API stopped');
-      });
-    }
+    expect(response.status).toBe(200);
+    expect(mockedProcessAssetExpiryWebhook).toHaveBeenCalledWith(payload);
+    expect(response.body).toEqual({
+      status: 200,
+      message: 'Asset expiry webhook processed successfully',
+      data: {
+        message: 'processed',
+      },
+    });
   });
-};
 
-runRetryApiTest();
-npx ts-node src/test-retry-api.ts
+  it('should call error middleware when service fails', async () => {
+    const app = createApp();
+
+    mockedProcessAssetExpiryWebhook.mockRejectedValue(
+      new Error('Webhook processing failed')
+    );
+
+    const response = await request(app)
+      .post('/api/v1/webhook/asset-expiry')
+      .send({
+        recordId: 'test-record-id',
+        contentType: 'Asset',
+      });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      message: 'Webhook processing failed',
+    });
+  });
+});
