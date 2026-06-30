@@ -1,4 +1,9 @@
-7import express, { ErrorRequestHandler } from 'express';
+99 import express, {
+  ErrorRequestHandler,
+  NextFunction,
+  Request,
+  Response,
+} from 'express';
 import request from 'supertest';
 import WebhookController from '../../controllers/WebhookController';
 import { processAssetExpiryWebhook } from '../../services/webhookService';
@@ -16,12 +21,37 @@ describe('WebhookController', () => {
 
     app.use(express.json());
 
+    app.use((req: Request, _res: Response, next: NextFunction): void => {
+      Object.defineProperty(req, 'log', {
+        value: {
+          debug: jest.fn(),
+          error: jest.fn(),
+          info: jest.fn(),
+          warn: jest.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      next();
+    });
+
     app.post(
       '/api/v1/webhook/asset-expiry',
       WebhookController.assetExpiry
     );
 
-    const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
+    const errorHandler: ErrorRequestHandler = (
+      error: Error,
+      _req: Request,
+      res: Response,
+      next: NextFunction
+    ): void => {
+      if (res.headersSent) {
+        next(error);
+        return;
+      }
+
       res.status(500).json({
         message: error.message,
       });
@@ -47,27 +77,33 @@ describe('WebhookController', () => {
       calculatedExpirationDate: '2026-12-31',
     };
 
-    mockedProcessAssetExpiryWebhook.mockResolvedValue({
-      message: 'processed',
-    });
+    mockedProcessAssetExpiryWebhook.mockResolvedValue(undefined);
 
     const response = await request(app)
       .post('/api/v1/webhook/asset-expiry')
       .send(payload);
 
     expect(response.status).toBe(200);
+
+    expect(mockedProcessAssetExpiryWebhook).toHaveBeenCalledTimes(1);
     expect(mockedProcessAssetExpiryWebhook).toHaveBeenCalledWith(payload);
+
     expect(response.body).toEqual({
       status: 200,
       message: 'Asset expiry webhook processed successfully',
-      data: {
-        message: 'processed',
-      },
     });
   });
 
   it('should call error middleware when service fails', async () => {
     const app = createApp();
+
+    const payload = {
+      environment: 'dev',
+      recordId: 'test-record-id',
+      contentType: 'Asset',
+      triggerType: 'update',
+      calculatedExpirationDate: '2026-12-31',
+    };
 
     mockedProcessAssetExpiryWebhook.mockRejectedValue(
       new Error('Webhook processing failed')
@@ -75,12 +111,10 @@ describe('WebhookController', () => {
 
     const response = await request(app)
       .post('/api/v1/webhook/asset-expiry')
-      .send({
-        recordId: 'test-record-id',
-        contentType: 'Asset',
-      });
+      .send(payload);
 
     expect(response.status).toBe(500);
+
     expect(response.body).toEqual({
       message: 'Webhook processing failed',
     });
